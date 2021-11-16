@@ -27,10 +27,10 @@ class Progress:
         if hasattr(iterable, '__len__'):
             self.size = len(iterable)
         
-        # is pytorch dataloader
-        if hasattr(iterable, 'batch_size'):
-            self.batch = getattr(iterable, 'batch_size')
-            self.size = len(iterable.dataset)
+        # # is pytorch dataloader
+        # if hasattr(iterable, 'batch_size'):
+        #     self.batch = getattr(iterable, 'batch_size')
+        #     self.size = len(iterable.dataset)
 
 
         self.idx = 0

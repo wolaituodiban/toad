@@ -1,19 +1,22 @@
+from typing import Dict, Callable
+
 import torch
-import numpy as np
 from torch import optim
 
-from .history import History
 from .callback import callback as Callback
+from .earlystop import earlystopping
+from .history import History
+from .metric import metric
+from ..module import Module
 
 from ...utils.progress import Progress
 
 
-        
 class Trainer:
     """trainer for training models
     """
     def __init__(self, model, loader = None, optimizer = None, loss = None, keep_history = None,
-                 early_stopping = None):
+                 early_stopping: earlystopping = None, metrics: Dict[str, Callable] = {}, log_forward=True):
         """initialization
 
         Args:
@@ -23,7 +26,9 @@ class Trainer:
             loss (Callable): could be called as 'loss(y_hat, y)'
             early_stopping (earlystopping): the default value is `loss_earlystopping`, 
                 you can set it to `False` to disable early stopping
+            metrics (dict(str, callable)): name and metric function which will be called as metric_func(y_hat, y)
             keep_history (int): keep the last n-th epoch logs, `None` will keep all
+            log_forward (bool): auto log output of forward
         """
         self.model = model
         self.loader = loader
@@ -41,17 +46,31 @@ class Trainer:
             early_stopping = loss_scoring
         
         self.early_stop = early_stopping
+        self.metrics = [metric(name=k)(v) for k, v in metrics.items()]
+        self.log_forward = log_forward
 
         from collections import deque
         self.history = deque(maxlen = keep_history)
+        self._current_history: History = None
 
+    def fit_step(self, batch):
+        if isinstance(self.model, Module):
+            l = self.model.fit_step(batch)
+        else:
+            pred = self.model(batch[0])
+            l = self.loss(pred, batch[1])
+            if self.log_forward:
+                self._current_history.log('pred', pred)
+        self._current_history.log('loss', l)
+        self._current_history.log('label', batch[1])
+        return l
 
-    def train(self, loader = None, epoch = 10, callback = None, start = 0, backward_rounds = 1):
+    def train(self, loader = None, valid_loader = None, epoch = 10, callbacks = [], start = 0, backward_rounds = 1):
         """
         Args:
             loader (torch.DataLoader): training data loader
             epoch (int): number of epoch for training loop
-            callback (callable): callable function will be called every epoch
+            callbacks (callable): callable function will be called every epoch
                 - parameters of callback
                     model (nn.Module): the training model
                     history (History): history of total log records
@@ -69,8 +88,7 @@ class Trainer:
         if self.loader is None:
             raise ValueError("loader is not set, please set a loader for trainning!")
 
-        if callback and not isinstance(callback, Callback):
-            callback = Callback(callback)
+        callbacks = [c if isinstance(c, Callback) else Callback(c) for c in callbacks]
         
         # init progress bar
         p = Progress(self.loader)
@@ -82,21 +100,14 @@ class Trainer:
             p.prefix = f"Epoch:{ep}"
 
             # setup a new history for model in each epoch
-            history = History()
-            self.history.append(history)
-            self.model._history = history
+            self._current_history = History()
+            self.history.append(self._current_history)
 
             loss = 0.
             backward_loss = 0.
             for i, batch in enumerate(p, start = 1):
                 # step fit
-                if self.loss is None:
-                    l = self.model.fit_step(batch)
-                else:
-                    l = self.model.fit_step(batch, loss=self.loss)
-
-                # log loss
-                self.model.log('loss', l)
+                l = self.fit_step(batch)
                 
                 backward_loss = l + backward_loss
                 if i % backward_rounds == 0 or i == len(p):
@@ -110,67 +121,72 @@ class Trainer:
                 loss += (l.item() - loss) / i
                 p.suffix = 'loss:{:.4f}'.format(loss)
 
+            # collate current history
+            self._current_history.collate()
+
             # setup callback params
             callback_params = {
-                "model": self.model,
-                "history": history,
+                "model": self.model.eval(),
+                "history": self._current_history,
                 "epoch": ep,
                 "trainer": self,
             }
 
             with torch.no_grad():
+                for metric in self.metrics:
+                    print('{}:'.format(metric.name), metric(**callback_params))
+
+                if self.metrics and valid_loader:
+                    self.evaluate(valid_loader, callbacks = self.metrics)
+
+                for c in callbacks:
+                    c(**callback_params)
+                    
                 if self.early_stop and self.early_stop(**callback_params):
                     # set best state to model
                     best_state = self.early_stop.get_best_state()
                     self.model.load_state_dict(best_state)
-                    break
-                
-                if callable(callback):
-                    callback(**callback_params)
-        
+                    return self.model
+
         return self.model
     
-
     @torch.no_grad()
-    def evaluate(self, loader, callback = None):
+    def evaluate(self, loader, callbacks = []):
         """evalute model
 
         Args:
             loader (torch.DataLoader): evaluation data loader
             callback (callable): callback function
         """
-        if callback and not isinstance(callback, Callback):
-            callback = Callback(callback)
+        callbacks = [c if isinstance(c, Callback) else Callback(c) for c in callbacks]
         
         # init progress bar
         p = Progress(loader)
         p.prefix = f"Evaluate"
 
-        history = History()
-        self.model._history = history
-
+        self._current_history = History()
         self.model.eval()
         
         loss = 0.
         for i, batch in enumerate(p, start = 1):
             # step fit
-            if self.loss is None:
-                l = self.model.fit_step(batch)
-            else:
-                l = self.model.fit_step(batch, loss=self.loss)
-
-            # log loss
-            self.model.log('loss', l)
+            l = self.fit_step(batch)
 
             loss += (l.item() - loss) / i
             p.suffix = 'loss:{:.4f}'.format(loss)
-        
-        if callable(callback):
-            callback(
-                epoch = None,
-                history = history,
-                trainer = self,
-                model = self.model,
-            )
-        
-        return history
+        self._current_history.collate()
+
+        callback_params = {
+            "model": self.model.eval(),
+            "history": self._current_history,
+            "trainer": self,
+            "epoch": None
+        }
+
+        for metric in self.metrics:
+            print('{}:'.format(metric.name), metric(**callback_params))
+
+        for c in callbacks:
+            c(**callback_params)
+
+        return self._current_history

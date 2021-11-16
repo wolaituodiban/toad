@@ -4,7 +4,7 @@ from torch import nn, optim
 from torch.nn.parallel import DistributedDataParallel
 
 from ..utils.progress import Progress
-
+from torch.utils.data import DataLoader
 
 
 class Module(nn.Module):

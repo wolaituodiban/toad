@@ -3,6 +3,7 @@ import json
 import string
 import numpy as np
 import pandas as pd
+from typing import List, Tuple, Callable, Union
 from functools import wraps
 
 from multiprocessing import Pool, current_process, cpu_count
@@ -408,3 +409,117 @@ def get_dummies(dataframe, exclude = None, binary_drop = False, **kwargs):
 
     data = pd.get_dummies(dataframe, columns = columns, **kwargs)
     return data
+
+
+def _metric(func, label_first):
+    """
+    a wrapper for func, which will make the func compatible with dict and list
+    Examples:
+        >>> from sklearn.metrics import roc_auc_score
+        ... y_hat = ...
+        ... y = ...
+        ... auc = metric(roc_auc_score, label_first=True)
+        ... auc(y, y_hat)
+        0.5
+
+        >>> y_hat = {'a': ..., 'b': ...}
+        ... y = {'a': ..., 'b': ...}
+        ... auc = metric(roc_auc_score, label_first=True)
+        ... auc(y, y_hat)
+        {'a': 0.5, 'b': 0.5}
+
+        >>> y_hat = [..., ...]
+        ... y = [..., ...]
+        ... auc = metric(roc_auc_score, label_first=True)
+        ... auc(y, y_hat)
+        [0.5, 0.5]
+
+    Args:
+        func: metric func, list of funcs or dict of funcs
+        label_first: whether the metric func receive label as the first argument
+
+    Returns:
+        new function
+    """
+
+    def label_last_func(pred, label):
+        """transform the func to label last form"""
+        if label_first:
+            return func(label, pred)
+        else:
+            return func(pred, label)
+
+    def new_func(pred, label):
+        if isinstance(pred, np.ndarray):
+            return label_last_func(pred=pred, label=label)
+        elif isinstance(pred, list):
+            return [new_func(pred=_p, label=_l) for _p, _l in zip(pred, label)]
+        elif isinstance(pred, dict):
+            return {key: new_func(pred=pred[key], label=label[key]) for key in set(pred).intersection(label)}
+        raise TypeError('only accept "numpy", "list", "dict"')
+
+    return new_func
+
+
+def metric(x: Union[Callable, List[Tuple[str, Callable, bool]]], label_first=None):
+    """
+    given a json format input, several json path and metrics func
+    return metric value for certern json path and metric
+    Examples:
+        >>> from sklearn.metrics import roc_auc_score
+        ... y_hat = ...
+        ... y = ...
+        ... auc = metric(roc_auc_score, label_first=True)
+        ... auc(y, y_hat)
+        0.5
+
+        >>> y_hat = {'a': ..., 'b': ...}
+        ... y = {'a': ..., 'b': ...}
+        ... auc = metric(roc_auc_score, label_first=True)
+        ... auc(y, y_hat)
+        {'a': 0.5, 'b': 0.5}
+
+        >>> y_hat = [..., ...]
+        ... y = [..., ...]
+        ... auc = metric(roc_auc_score, label_first=True)
+        ... auc(y, y_hat)
+        [0.5, 0.5]
+
+        >>> from sklearn.metrics import roc_auc_score, mean_squared_error
+        ... y_hat = {'a': {'c': ..., 'd': ...}, 'b': [..., ...]}
+        ... y = {'a': {'c': ..., 'd': ...}, 'b': [..., ...]}
+        ... auc = json_metric(
+        ...     [
+        ...         ('$.a', roc_auc_score, True),
+        ...         ('$.b', mean_squared_error, True)
+        ...     ]
+        ... )
+        ... auc(y, y_hat)
+        [{'c': 0.5', 'd': 0.6}, [0.23, 0.45]]
+    Args:
+        x: Callable or list of tuple(json path (str), function (callable), label_first (bool))
+        label_fist: if is not None, func should be a single function
+
+    Returns:
+        new function
+    """
+    if label_first is not None:
+        return _metric(x, label_first=label_first)
+
+    from jsonpromax import JsonPathTree
+
+    tree_and_funcs = []
+    for path, func, label_first in x:
+        tree = JsonPathTree([(path, )])
+        new_func = _metric(func, label_first=label_first)
+        tree_and_funcs.append((tree, new_func))
+
+    def func_wrapper(pred, label):
+        outputs = []
+        for t, f in tree_and_funcs:
+            _pred = t(pred)
+            _label = t(label)
+            outputs.append(f(pred=_pred, label=_label))
+        return outputs
+
+    return func_wrapper

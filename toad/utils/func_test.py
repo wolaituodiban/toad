@@ -12,6 +12,7 @@ from .func import (
     generate_str,
     get_dummies,
     feature_splits,
+    metric,
 )
 
 np.random.seed(1)
@@ -122,3 +123,19 @@ def test_get_dummies_binary():
     data = get_dummies(df, binary_drop = True)
     
     assert 'binary_A' not in data.columns
+
+
+def test_metric():
+    from sklearn.metrics import roc_auc_score, mean_squared_error
+    pred = {'a': np.array([0.2, 0.3])}
+    label = {'a': np.array([1, 0])}
+    auc = metric(roc_auc_score, label_first=True)
+    out = auc(pred, label)
+    assert out == {'a': 0.0}, out
+
+
+    pred = {'a': {'c': np.array([0.2, 0.3])}, 'b': [np.array([0.2, 0.3])]}
+    label = {'a': {'c': np.array([1, 0])}, 'b': [np.array([0.2, 0.3])]}
+    func = metric([('$.a', roc_auc_score, True), ('$.b', mean_squared_error, True)])
+    out = func(pred, label)
+    assert out == [{'c': 0.0}, [0.0]], out
